@@ -1,0 +1,134 @@
+/*
+Usage:
+
+> webppl kiraly3_test.wppl --require .
+*/
+var zip_dist = function(dist) {
+    return map(function(e) {
+        return {e, p: Math.exp(dist.score(e))}
+    }, dist.support())
+}
+
+var test_trajectories = function () {
+    var trajectories = Infer({model() {
+        var wp = sampWorldParams()
+        var w = makeWorld(wp)
+        var transition = w.transition
+        var actions = w.actions
+        var initialState = w.initialState
+        var reward = w.reward
+        var s = initialState()
+        var a = actions(s)
+        var ns = transition(s, a)
+        var r = reward(s, a, ns)
+        return extend(wp, {s, a, ns, r})
+    }}).support()
+    return trajectories
+}
+
+var test_observer = function () {
+    var traj = {
+        s: {hands: 'free', box: 'unlit'},
+        a: 'use-head',
+        ns: {hands: 'free', box: 'lit'},
+    }
+    var wp = {
+        dem_is_communicative: false,
+    }
+    var obs = observer(traj, wp)
+    return obs
+}
+
+var test_demonstrator = function (wp) {
+    // var wp = {
+    //     light_is_goal: false,
+    //     subgoal: 'do-nothing',
+    //     box_is_light: true,
+    //     dem_is_communicative: true
+    // }
+    var dem_pol = Infer({model() {
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var action_value = dem.action_value
+        var w = makeWorld(wp)
+        var informative_reward = w.informative_reward
+        var transition = w.transition
+        var belief_change = w.belief_change
+        var optimal_stochastic_policy = dem.optimal_stochastic_policy
+        var initialState = w.initialState
+        var s = { hands: 'free', box: 'unlit' }
+        var a = policy(s)
+        var astar = optimal_stochastic_policy(s)
+        return {
+            a,
+            astar,
+            av: action_value(s, a),
+            info_r: expectation(Infer(function() {
+                var ns = transition(s, a)
+                return informative_reward(s, a, ns)
+            })),
+            bchange: expectation(Infer(function () {
+                var ns = transition(s, a)
+                var bb = belief_change(s, a, ns)
+                return bb.b1 - bb.b0
+            }))
+        }
+    }})
+    return dem_pol
+}
+
+var wp = {
+    light_is_goal: false,
+    subgoal: 'do-nothing',
+    box_is_light: true,
+    dem_is_communicative: true
+}
+
+var disp_results = function (obs, traj) {
+    display(zip_dist(marginalize(obs, function (wp) {
+        return {
+            dem_is_communicative: wp.dem_is_communicative,
+            hands: traj.s.hands
+        }
+    })))
+}
+
+var run_condition = function (traj, assumptions) {
+    display({hands: traj.s.hands, comm: assumptions.dem_is_communicative})
+    var obs_im = observer_imitation(traj, assumptions)
+    var obs_avs = obs_im.action_values
+    display(obs_im.softmax_policy)
+    display(obs_avs['use-head'] - obs_avs['use-hand'])
+}
+
+var hands_free_traj = {
+    s: {hands: 'free', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'free', box: 'lit'},
+}
+
+var hands_occ_traj = {
+    s: {hands: 'occ', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'occ', box: 'lit'},
+}
+
+var no_effect_traj = {
+    s: {hands: 'free', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'free', box: 'unlit'},
+}
+var instrumental_wp = {
+    dem_is_communicative: false,
+    obs_is_inverse_planning: true
+}
+var communicative_wp = {
+    dem_is_communicative: true,
+    obs_is_inverse_planning: true
+}
+run_condition(hands_free_traj, instrumental_wp)
+run_condition(hands_occ_traj, instrumental_wp)
+run_condition(hands_free_traj, communicative_wp)
+run_condition(hands_occ_traj, communicative_wp)
+display('no effect')
+run_condition(no_effect_traj, communicative_wp)

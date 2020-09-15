@@ -1,0 +1,116 @@
+/*
+Usage:
+
+> webppl butler3_test.wppl --require .
+*/
+var zip_dist = function(dist) {
+    return map(function(e) {
+        return {e, p: Math.exp(dist.score(e))}
+    }, dist.support())
+}
+
+var test_trajectories = function () {
+    return Infer(function () {
+        var wp = sampWorldParams()
+        var w = makeWorld(wp)
+        var transition = w.transition
+        var initialState = w.initialState
+        var actions = w.actions
+        var s = initialState()
+        var a = actions(s)
+        var ns = transition(s, a)
+        return {s, a, ns}
+    })
+}
+// var trajs = test_trajectories()
+// display(map(function(s) {JSON.stringify(s)}, trajs))
+
+var test_observer = function () {
+    var traj = {
+        s: {
+            blicket: 'on-table',
+             paperclips: 'unattached'
+        },
+        a: 'put-blicket-away',
+        ns: {
+            blicket: 'put-away',
+            slipped: true,
+            paperclips: 'unattached'
+        }
+    }
+    var wp = {
+        dem_is_communicative: false,
+        obs_is_inverse_planning: true
+    }
+    var obs = observer(traj, wp)
+    return obs
+}
+
+var test_demonstrator = function (wp, s0) {
+    var dem_pol = Infer({model() {
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var action_value = dem.action_value
+        var w = makeWorld(wp)
+        var informative_reward = w.informative_reward
+        var action_reward = w.action_reward
+        var goal_reward = w.goal_reward
+        var informative_reward = w.informative_reward
+        var transition = w.transition
+        var belief_change = w.belief_change
+        var optimal_policy = dem.optimal_policy
+        var initialState = w.initialState
+        var s = extend(initialState(), s0)
+        var a = policy(s)
+        // var astar = optimal_policy(s).join(',')
+        return {
+            a,
+            // astar,
+            action_r: expectation(Infer(function() {
+                var ns = transition(s, a)
+                return action_reward(s, a, ns)
+            })),
+            goal_r: expectation(Infer(function() {
+                var ns = transition(s, a)
+                return goal_reward(s, a, ns)
+            })),
+            av: action_value(s, a),
+            info_r: expectation(Infer(function() {
+                var ns = transition(s, a)
+                return informative_reward(s, a, ns)
+            })),
+            bchange: expectation(Infer(function () {
+                var ns = transition(s, a)
+                var bb = belief_change(s, a, ns)
+                return bb.b1 - bb.b0
+            }))
+        }
+    }})
+    return dem_pol
+}
+
+var wp = {
+    is_peeler: false,
+    peeling_is_goal: true,
+    dem_is_communicative: true,
+    obs_is_inverse_planning: true
+}
+var s0 = {
+    banana: "unpeeled"
+}
+// display(zip_dist(test_demonstrator(wp, s0)))
+
+var test_demonstration = function (wp, s0) {
+    return Infer(function () {
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var w = makeWorld(wp)
+        var transition = w.transition
+        var initialState= w.initialState
+        var s = extend(initialState(), s0)
+        var a = policy(s)
+        var ns = transition(s, a)
+
+    })
+}
+display(zip_dist(test_demonstration(wp, s0)))

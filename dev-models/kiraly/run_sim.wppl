@@ -1,0 +1,83 @@
+/*
+Usage:
+> webppl run_sim.wppl --require . --require webppl-json -- --config sim_config.json
+*/
+var default_config = {
+    "simname": "kiraly_test",
+    'box-is-light-prior': .1,
+    'subgoal-prior': .8,
+    'use-hand-subgoal-prior': .95,
+
+    'teaching-weight': 1,
+    'randchoose': 0.0,
+    'softmax_temp': 0.5,
+    'observer-softmax': .5
+}
+var passed_config = argv['config'] ? json.read("./"+argv['config']) : {}
+globalStore['config'] = Object.assign(default_config, passed_config)
+
+var run_condition = function (traj, assumptions) {
+    var trajstr = [traj.s.box, traj.a, traj.ns.box].join(',')
+    var imitation = observer_imitation(traj, assumptions)
+    var res = extend(
+        {s: traj.s.box, a: traj.a, ns: traj.ns.box},
+        assumptions,
+        _.fromPairs(map(function (kv) {
+            return ['pi('+kv[0]+')', kv[1]]
+        }, _.toPairs(imitation.softmax_policy))),
+        _.fromPairs(map(function (kv) {
+            return ['Q('+kv[0]+')', kv[1]]
+        }, _.toPairs(imitation.action_values)))
+    )
+    return res
+}
+
+var hands_free_traj = {
+    s: {hands: 'free', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'free', box: 'lit'},
+}
+
+var hands_occ_traj = {
+    s: {hands: 'occ', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'occ', box: 'lit'},
+}
+
+var no_effect_traj = {
+    s: {hands: 'free', box: 'unlit'},
+    a: 'use-head',
+    ns: {hands: 'free', box: 'unlit'},
+}
+var instrumental_wp = {
+    dem_is_communicative: false,
+    obs_is_inverse_planning: true
+}
+var communicative_wp = {
+    dem_is_communicative: true,
+    obs_is_inverse_planning: true
+}
+var conditions = [
+    extend(
+        {name: "free+inst"},
+        run_condition(hands_free_traj, instrumental_wp)
+    ),
+    extend(
+        {name: "occ+inst"},
+        run_condition(hands_occ_traj, instrumental_wp)
+    ),
+    extend(
+        {name: "free+com"},
+        run_condition(hands_free_traj, communicative_wp)
+    ),
+    extend(
+        {name: "occ+com"},
+        run_condition(hands_occ_traj, communicative_wp)
+    ),
+    extend(
+        {name: "noeffect+com"},
+        run_condition(no_effect_traj, communicative_wp)
+    )
+]
+var results = {conditions: conditions, config: globalStore['config']}
+json.write("simulations/"+globalStore['config']['simname']+".json", results)

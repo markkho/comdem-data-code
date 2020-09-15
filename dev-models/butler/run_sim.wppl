@@ -1,0 +1,87 @@
+/*
+Usage:
+> webppl run_sim.wppl --require . --require webppl-json -- --config sim_config.json
+*/
+var default_config = {
+    "simname": "butler_test",
+    "blicket-magnetic-prior": .1,
+    "magnetic-strength": .8,
+    "alternative-stick-prob": .1,
+
+    "slip-prob": .2,
+    "step-cost": -.1,
+
+    'teaching-weight': 1,
+    'softmax_temp': 0.1,
+    'randchoose': 0.0,
+}
+var passed_config = argv['config'] ? json.read("./"+argv['config']) : {}
+globalStore['config'] = Object.assign(default_config, passed_config)
+
+var as_object = function(dist) {
+    return map(function(e) {
+        return extend(e, {
+            prob: Math.exp(dist.score(e))
+        })
+    }, dist.support())
+}
+
+var zip_dist = function(dist) {
+    return map(function(e) {
+        return [e, Math.exp(dist.score(e))]
+    }, dist.support())
+}
+
+var run_condition = function (traj, assumptions) {
+    var obs = observer(traj, assumptions)
+    var demonstration = traj.a === 'put-blicket-on-paperclips' ?
+        'intentional' : 'accidental'
+    var context = assumptions.dem_is_communicative ?
+        "communicative" : "instrumental"
+    var name = demonstration+"+"+context
+    return extend(
+        {
+            "p(mag)": Math.exp(marginalize(obs, 'blicket_is_magnetic').score(true)),
+        },
+        {
+            demonstration, context, name
+        },
+        assumptions
+    )
+}
+
+var intentional = {
+    s: { blicket: 'on-table', paperclips: 'unattached' },
+    a: 'put-blicket-on-paperclips',
+    ns: { blicket: 'put-away', slipped: false, paperclips: 'attached' }
+}
+var accidental = {
+    s: { blicket: 'on-table', paperclips: 'unattached' },
+    a: 'put-blicket-away',
+    ns: { blicket: 'put-away', slipped: true, paperclips: 'attached' }
+}
+var communicative = {
+    dem_is_communicative: true,
+    obs_is_inverse_planning: true
+}
+var noncommunicative = {
+    dem_is_communicative: false,
+    obs_is_inverse_planning: true
+}
+
+var conditions = [
+    extend(
+        {name: "intentional"},
+        run_condition(intentional, noncommunicative)
+    ),
+    extend(
+        {name: "accidental"},
+        run_condition(accidental, noncommunicative)
+    ),
+    extend(
+        {name: "communicative"},
+        run_condition(intentional, communicative)
+    ),
+]
+var results = {conditions: conditions, config: globalStore['config']}
+json.write("simulations/"+globalStore['config']['simname']+".json", results)

@@ -1,0 +1,106 @@
+/*
+Usage:
+> webppl run_sim.wppl --require . --require webppl-json -- --config sim_config.json
+*/
+var default_config = {
+    "simname": "hernik_test",
+    "is-peeler-prior": .1,
+    "peeler-efficacy": .99,
+    "alt-peel-prob": .5,
+    "peeling-goal-prior": 1.0,
+
+    "step-cost": -1,
+
+    'teaching-weight': 1,
+    'softmax_temp': .2,
+    'randchoose': 0.0,
+}
+var passed_config = argv['config'] ? json.read("./"+argv['config']) : {}
+globalStore['config'] = Object.assign(default_config, passed_config)
+
+var as_object = function(dist) {
+    return map(function(e) {
+        return extend(e, {
+            prob: Math.exp(dist.score(e))
+        })
+    }, dist.support())
+}
+
+var zip_dist = function(dist) {
+    return map(function(e) {
+        return [e, Math.exp(dist.score(e))]
+    }, dist.support())
+}
+
+var run_condition = function (traj, assumptions) {
+    var obs = observer(traj, assumptions)
+
+    var is_peeler_belief = Math.exp(marginalize(obs, 'is_peeler').score(true))
+    var peeling_is_goal_belief = Math.exp(marginalize(obs, 'peeling_is_goal').score(true))
+
+    var trials = Infer(function() {
+        var wp = extend(sample(obs), {
+            dem_is_communicative: false,
+            obs_is_inverse_planning: true
+        })
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var w = makeWorld(wp)
+        var initialState = w.initialState
+        var transition = w.transition
+        var s = initialState()
+        var a = policy(s)
+        var ns = transition(s, a)
+        return [a, ns.banana].join(',')
+    })
+    var test_trials = _.fromPairs(map(function (kv) {
+        return ["p("+kv[0]+")", kv[1]]
+    }, zip_dist(trials)))
+    return extend(
+        {
+            s: traj.s.banana, a: traj.a, ns: traj.ns.banana
+        },
+        assumptions,
+        {
+            is_peeler_belief, peeling_is_goal_belief
+        },
+        test_trials
+    )
+}
+
+var changed_traj = {
+    s: { banana: 'unpeeled' },
+    a: 'use-tool',
+    ns: { banana: 'peeled' }
+}
+
+var unchanged_traj = {
+    s: { banana: 'unpeeled' },
+    a: 'use-tool',
+    ns: { banana: 'unpeeled' }
+}
+var communicative = {
+    dem_is_communicative: true,
+    obs_is_inverse_planning: true
+}
+var noncommunicative = {
+    dem_is_communicative: false,
+    obs_is_inverse_planning: true
+}
+
+var conditions = [
+    extend(
+        {name: "changed+comm"},
+        run_condition(changed_traj, communicative)
+    ),
+    extend(
+        {name: "unchanged+com"},
+        run_condition(unchanged_traj, communicative)
+    ),
+    extend(
+        {name: "changed+inst"},
+        run_condition(changed_traj, noncommunicative)
+    ),
+]
+var results = {conditions: conditions, config: globalStore['config']}
+json.write("simulations/"+globalStore['config']['simname']+".json", results)

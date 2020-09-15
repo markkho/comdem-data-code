@@ -1,0 +1,223 @@
+globalStore['config'] = {
+    'box-is-light-prior': .05,
+    'subgoal-prior': .7,
+    'use-hand-subgoal-prior': .95,
+
+    'teaching-weight': 1,
+    'randchoose': 0.0,
+    'softmax_temp': 0.1,
+    'observer-softmax': .5
+}
+
+var sampWorldParams = function() {
+    var config = globalStore['config']
+    var box_is_light = flip(config['box-is-light-prior'])
+    var light_is_goal = box_is_light
+    var subgoal =
+        light_is_goal ? (
+            flip(config['use-hand-subgoal-prior']) ?
+                'use-hand' : 'use-head'
+            ) : 'do-nothing'
+
+    var dem_is_communicative = flip()
+    var obs_is_inverse_planning = flip()
+    return {light_is_goal, subgoal, box_is_light, dem_is_communicative, obs_is_inverse_planning}
+}
+
+var makeWorld = function(wp) {
+    var config = globalStore['config']
+    var initialState = function() {
+        var hands = uniformDraw(['occ', 'free'])
+        return {hands, box: 'unlit'}
+    }
+
+    var actions = function(s) {
+        return s.hands === 'occ' ?
+            uniformDraw(['do-nothing', 'use-head']) :
+            uniformDraw(['do-nothing', 'use-head', 'use-hand'])
+    }
+
+    var transition = function(s, a) {
+        var box_touched = a !== 'do-nothing'
+        var box = box_touched && wp.box_is_light ?
+            'lit' : 'unlit'
+        return {box, hands: s.hands}
+    }
+
+    var goal_reward = function(s, a, ns) {
+        var goal_r =
+            wp.light_is_goal && ns.box === 'lit' ? 1 : 0
+        return goal_r
+    }
+
+    var action_reward = function(s, a, ns) {
+        if (a === 'do-nothing') {
+            return 0.0
+        }
+        var subgoal_matched = a === wp.subgoal
+        var action_r =
+            subgoal_matched ?
+                Math.log(config['subgoal-prior']) :
+                Math.log(1 - config['subgoal-prior'])
+        return action_r
+    }
+
+    var belief_change = function (s, a, ns) {
+        var obs_assumptions = {
+            dem_is_communicative: false
+        }
+        var obs0 = observer({}, obs_assumptions)
+        var traj = {s, a, ns}
+        var obs1 = observer(traj, obs_assumptions)
+        var non_com_wp = extend(wp, obs_assumptions)
+
+        var comm_target = !wp.light_is_goal ?
+            "light_is_goal" : "subgoal"
+        var b0 = Math.exp(marginalize(obs0, comm_target).score(wp[comm_target]))
+        var b1 = Math.exp(marginalize(obs1, comm_target).score(wp[comm_target]))
+        return {b0, b1}
+    }
+
+    var informative_reward = function (s, a, ns) {
+        if (!wp.dem_is_communicative) {
+            return 0.0
+        }
+        var bb = belief_change(s, a, ns)
+        var info_r =
+            config['teaching-weight']*(bb.b1 - bb.b0)
+        return info_r
+    }
+
+    var reward = function(s, a, ns) {
+        var goal_r = goal_reward(s, a, ns)
+        var action_r = action_reward(s, a, ns)
+        var info_r = informative_reward(s, a, ns)
+        return goal_r + action_r + info_r
+    }
+
+    return {
+        initialState, actions, transition,
+        reward, goal_reward, action_reward,
+        informative_reward, belief_change
+    }
+}
+
+var demonstrator = function(wp) {
+    var config = globalStore['config']
+    var w = makeWorld(wp)
+    var transition = w.transition
+    var actions = w.actions
+    var initialState = w.initialState
+    var reward = w.reward
+
+    var action_list = cache(function(s) {
+        return Infer(function() {actions(s)}).support()
+    })
+
+    var action_value = function(s, a) {
+        var reward_dist = Infer({model() {
+            var ns = transition(s, a)
+            var r = reward(s, a, ns)
+            return r
+        }})
+        var exp_reward = reduce(function(r, ev) {
+            return ev + r*Math.exp(reward_dist.score(r))
+        }, 0, reward_dist.support())
+        return exp_reward
+    }
+
+    var optimal_stochastic_policy = function(s) {
+        var aa = action_list(s)
+        var av = function(a) {action_value(s, a)}
+        var max_av = _.max(map(av, aa))
+        var max_a = filter(function(a){av(a) === max_av}, aa)
+        return uniformDraw(max_a)
+    }
+
+    var softmax_dist = cache(function(s) {
+        var pi = Infer({model() {
+            var aa = action_list(s)
+            var a = uniformDraw(aa)
+            var av = action_value(s, a)
+            factor((1/config['softmax_temp'])*av)
+            return a
+        }})
+        return pi
+    })
+
+    var softmax_policy = function(s) {
+        return sample(softmax_dist(s))
+    }
+
+    var policy = function(s) {
+        if (flip(config['randchoose'])) {
+            var aa = action_list(s)
+            return uniformDraw(aa)
+        }
+        if (config['softmax_temp'] !== 0.0){
+            return softmax_policy(s)
+        }
+        return optimal_stochastic_policy(s)
+    }
+
+    return {policy, action_value,
+        optimal_stochastic_policy, softmax_policy}
+}
+
+var observer = function (traj, assumptions) {
+    // observer distribution
+    // if an empty trajectory is passed, returns the prior
+    var config = globalStore['config']
+    var assumptions = typeof assumptions === 'undefined' ?
+        {} : assumptions
+    return Infer({model() {
+        var wp = extend(sampWorldParams(), assumptions)
+        if (_.isEmpty(traj)) {
+            return wp
+        }
+        var w = makeWorld(wp)
+        var initialState = w.initialState
+        var transition = w.transition
+        var actions = w.actions
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var s = initialState()
+        var action_list =
+            Infer(function() {actions(s)}).support()
+        var a = wp.dem_is_communicative ?
+            policy(s) : (
+                wp.obs_is_inverse_planning ?
+                    policy(s) : uniformDraw(action_list)
+                )
+        var ns = transition(s, a)
+        factor(_.isEqual({s, a, ns}, traj) ? 0 : -Infinity)
+        return wp
+    }})
+}
+
+var observer_imitation = function (traj, assumptions) {
+    var config = globalStore['config']
+    var obs = observer(traj, assumptions)
+    var aa = ['use-hand', 'use-head', 'do-nothing']
+    var s = {hands: 'free', box: 'unlit'}
+    var action_value = function (a) {
+        return expectation(Infer(function () {
+            var wp = sample(obs)
+            var w = makeWorld(wp)
+            var transition = w.transition
+            var reward = w.reward
+            var ns = transition(s, a)
+            return reward(s, a, ns)
+        }))
+    }
+    var action_values = _.fromPairs(_.zip(aa, map(action_value, aa)))
+
+    var softmax_dist = Infer(function () {
+        var a = uniformDraw(aa)
+        factor((1/config['observer-softmax'])*action_value(a))
+        return a
+    })
+    var softmax_policy = _.fromPairs(_.zip(aa, map(function (a) {Math.exp(softmax_dist.score(a))}, aa)))
+
+    return {action_values, softmax_policy}
+}

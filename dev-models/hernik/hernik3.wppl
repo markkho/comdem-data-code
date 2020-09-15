@@ -1,0 +1,199 @@
+globalStore['config'] = {
+    "is-peeler-prior": .1,
+    "peeler-efficacy": .8,
+    "alt-peel-prob": .5,
+    "peeling-goal-prior": 0.0,
+
+    "step-cost": -.1,
+
+    'teaching-weight': 10,
+    'softmax_temp': 0.2,
+    'randchoose': 0.0,
+}
+
+var sampWorldParams = function() {
+    var config = globalStore['config']
+    var is_peeler = flip(config['is-peeler-prior'])
+    var peeling_is_goal = flip(config['peeling-goal-prior'])
+    var dem_is_communicative = flip()
+    var obs_is_inverse_planning = flip()
+    return {
+        is_peeler,
+        peeling_is_goal,
+        dem_is_communicative,
+        obs_is_inverse_planning
+    }
+}
+
+var makeWorld = function(wp) {
+    var config = globalStore['config']
+    var initialState = function() {
+        return {
+            banana: flip() ? "peeled" : "unpeeled"
+        }
+    }
+
+    var actions = function(s) {
+        return uniformDraw(['do-nothing', 'use-tool'])
+    }
+    var transitionCache = cache(function(s, a) {
+        return Infer({model() {
+            if (s.banana === 'peeled') {
+                return s
+            }
+            var tool_used = a === 'use-tool'
+            var tool_works =
+                tool_used && wp.is_peeler ?
+                    flip(config['peeler-efficacy']) : false
+            if (tool_works) {
+                return {banana: "peeled"}
+            }
+            var alt_peel = flip(config['alt-peel-prob'])
+            if (alt_peel) {
+                return {banana: "peeled"}
+            }
+            return s
+        }})
+    })
+
+    var transition = function(s, a) {
+        return sample(transitionCache(s, a))
+    }
+    var goal_reward = function(s, a, ns) {
+        var goal_r =
+            wp.peeling_is_goal
+            && ns.banana === 'peeled' ?
+                1 : 0
+        return goal_r
+    }
+
+    var action_reward = function(s, a, ns) {
+        if (a === 'do-nothing') {
+            return 0.0
+        }
+        if (a === 'use-tool') {
+            return config['step-cost']
+        }
+    }
+
+    var belief_change = function (s, a, ns) {
+        var obs_assumptions = {
+            dem_is_communicative: false
+        }
+        var obs0 = observer({}, obs_assumptions)
+        var obs1 = observer({s, a, ns}, obs_assumptions)
+        var comm_target = "is_peeler"
+        var b0 = Math.exp(marginalize(obs0, comm_target).score(wp[comm_target]))
+        var b1 = Math.exp(marginalize(obs1, comm_target).score(wp[comm_target]))
+        return {b0, b1}
+    }
+
+    var informative_reward = function (s, a, ns) {
+        if (!wp.dem_is_communicative) {
+            return 0.0
+        }
+        var bb = belief_change(s, a, ns)
+        var info_r =
+            config['teaching-weight']*(bb.b1 - bb.b0)
+        return info_r
+    }
+
+    var reward = function(s, a, ns) {
+        var goal_r = goal_reward(s, a, ns)
+        var action_r = action_reward(s, a, ns)
+        var info_r = informative_reward(s, a, ns)
+        return goal_r + action_r + info_r
+    }
+
+    return {
+        initialState, actions, transition,
+        reward, goal_reward, action_reward,
+        informative_reward, belief_change
+    }
+}
+
+var demonstrator = function(wp) {
+    var config = globalStore['config']
+    var w = makeWorld(wp)
+    var transition = w.transition
+    var actions = w.actions
+    var initialState = w.initialState
+    var reward = w.reward
+
+    var action_list = cache(function(s) {
+        return Infer(function() {actions(s)}).support()
+    })
+
+    var action_value = function(s, a) {
+        var reward_dist = Infer({model() {
+            var ns = transition(s, a)
+            var r = reward(s, a, ns)
+            return r
+        }})
+        var exp_reward = reduce(function(r, ev) {
+            return ev + r*Math.exp(reward_dist.score(r))
+        }, 0, reward_dist.support())
+        return exp_reward
+    }
+
+    var optimal_stochastic_policy = function(s) {
+        var aa = action_list(s)
+        var av = function(a) {action_value(s, a)}
+        var max_av = _.max(map(av, aa))
+        var max_a = filter(function(a){av(a) === max_av}, aa)
+        return uniformDraw(max_a)
+    }
+
+    var softmax_dist = cache(function(s) {
+        var pi = Infer({model() {
+            var aa = action_list(s)
+            var a = uniformDraw(aa)
+            var av = action_value(s, a)
+            factor((1/config['softmax_temp'])*av)
+            return a
+        }})
+        return pi
+    })
+
+    var softmax_policy = function(s) {
+        return sample(softmax_dist(s))
+    }
+
+    var policy = function(s) {
+        if (flip(config['randchoose'])) {
+            var aa = action_list(s)
+            return uniformDraw(aa)
+        }
+        if (config['softmax_temp'] !== 0.0){
+            return softmax_policy(s)
+        }
+        return optimal_stochastic_policy(s)
+    }
+
+    return {policy, action_value,
+        optimal_stochastic_policy, softmax_policy}
+}
+
+var observer = function (traj, assumptions) {
+    var config = globalStore['config']
+    // observer distribution
+    // if an empty trajectory is passed, returns the prior
+    var assumptions = typeof assumptions === 'undefined' ?
+        {} : assumptions
+    return Infer({model() {
+        var wp = extend(sampWorldParams(), assumptions)
+        if (_.isEmpty(traj)) {
+            return wp
+        }
+        var w = makeWorld(wp)
+        var initialState = w.initialState
+        var transition = w.transition
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+        var s = initialState()
+        var a = policy(s)
+        var ns = transition(s, a)
+        factor(_.isEqual({s, a, ns}, traj) ? 0 : -Infinity)
+        return wp
+    }})
+}

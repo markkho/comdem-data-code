@@ -1,0 +1,238 @@
+globalStore['config'] = {
+    "blicket-magnetic-prior": .05,
+    "magnetic-strength": .8,
+    "alternative-stick-prob": .1,
+
+    "slip-prob": .2,
+    "step-cost": -1,
+
+    'teaching-weight': 5,
+    'softmax_temp': 0.2,
+    'randchoose': 0.0,
+}
+
+var sampWorldParams = function() {
+    var config = globalStore['config']
+    var put_blicket_away_goal = true
+    var blicket_is_magnetic =
+        flip(config['blicket-magnetic-prior'])
+    var dem_is_communicative = flip()
+    var obs_is_inverse_planning = flip()
+    return {
+        put_blicket_away_goal,
+        blicket_is_magnetic,
+        dem_is_communicative,
+        obs_is_inverse_planning
+    }
+}
+
+var makeWorld = function(wp) {
+    var config = globalStore['config']
+    var initialState = function() {
+        return {
+            blicket: 'on-table',
+            paperclips: 'unattached'
+        }
+    }
+
+    var actions = function(s) {
+        return uniformDraw(['put-blicket-away', 'put-blicket-on-paperclips'])
+    }
+
+    var transition = function(s, a) {
+        var blicket_on_table = s.blicket === 'on-table'
+
+        var put_on_paperclips = a === 'put-blicket-on-paperclips'
+        var put_away = a === 'put-blicket-away'
+        var did_nothing = a === 'do-nothing'
+
+        var slipped = put_away && flip(config['slip-prob'])
+        var on_paperclips = put_on_paperclips || slipped
+
+        if (blicket_on_table && on_paperclips) {
+            var blicket_paperclips_stick =
+                (wp.blicket_is_magnetic && flip(config['magnetic-strength']))
+                || flip(config['alternative-stick-prob'])
+            return {
+                blicket: 'put-away',
+                slipped,
+                paperclips: blicket_paperclips_stick ?
+                    "attached" : "unattached"
+            }
+        }
+        if (blicket_on_table && put_away && !on_paperclips) {
+            return {
+                blicket: "put-away",
+                slipped,
+                paperclips: s.paperclips
+            }
+        }
+        if (did_nothing) {
+            return s
+        }
+    }
+
+    var goal_reward = function(s, a, ns) {
+        var goal_r =
+            wp.put_blicket_away_goal
+            && ns.blicket === 'put-away' ?
+                1 : 0
+        return goal_r
+    }
+
+    var action_reward = function(s, a, ns) {
+        if (a === 'do-nothing') {
+            return 0.0
+        }
+        if (a === 'put-blicket-on-paperclips') {
+            return 2*config['step-cost']
+        }
+        if (ns.slipped) {
+            return 2*config['step-cost']
+        }
+        else {
+            return config['step-cost']
+        }
+    }
+
+    var belief_change = function (s, a, ns) {
+        var obs_assumptions = {
+            dem_is_communicative: false
+        }
+        var obs0 = observer({}, obs_assumptions)
+        var obs1 = observer({s, a, ns}, obs_assumptions)
+        var comm_target = "blicket_is_magnetic"
+        var b0 = Math.exp(marginalize(obs0, comm_target).score(wp[comm_target]))
+        var b1 = Math.exp(marginalize(obs1, comm_target).score(wp[comm_target]))
+        return {b0, b1}
+    }
+
+    var informative_reward = function (s, a, ns) {
+        if (!wp.dem_is_communicative) {
+            return 0.0
+        }
+        var bb = belief_change(s, a, ns)
+        var info_r =
+            config['teaching-weight']*(bb.b1 - bb.b0)
+        return info_r
+    }
+
+    var reward = function(s, a, ns) {
+        var goal_r = goal_reward(s, a, ns)
+        var action_r = action_reward(s, a, ns)
+        var info_r = informative_reward(s, a, ns)
+        return goal_r + action_r + info_r
+    }
+
+    return {
+        initialState, actions, transition,
+        reward, goal_reward, action_reward,
+        informative_reward, belief_change
+    }
+}
+
+var demonstrator = function(assumptions) {
+    var config = globalStore['config']
+    var action_list = cache(function(s) {
+        return Infer(function() {
+            var wp = extend(sampWorldParams(), assumptions)
+            var w = makeWorld(wp)
+            var actions = w.actions
+            return actions(s)
+        }).support()
+    })
+
+    var action_value = function(s, a) {
+        var reward_dist = Infer({model() {
+            var wp = extend(sampWorldParams(), assumptions)
+            var w = makeWorld(wp)
+            var transition = w.transition
+            var reward = w.reward
+            var ns = transition(s, a)
+            var r = reward(s, a, ns)
+            return r
+        }})
+        var exp_reward = expectation(reward_dist)
+        return exp_reward
+    }
+
+    var optimal_policy = function (s) {
+        var aa = action_list(s)
+        var av = function(a) {action_value(s, a)}
+        var max_av = _.max(map(av, aa))
+        var max_a = filter(function(a){av(a) === max_av}, aa)
+        return max_a
+    }
+
+    var optimal_stochastic_policy = function(s) {
+        var max_a = optimal_policy(s)
+        return uniformDraw(max_a)
+    }
+
+    var softmax_dist = cache(function(s) {
+        var pi = Infer({model() {
+            var aa = action_list(s)
+            var a = uniformDraw(aa)
+            var av = action_value(s, a)
+            factor((1/config['softmax_temp'])*av)
+            return a
+        }})
+        return pi
+    })
+
+    var softmax_policy = function(s) {
+        return sample(softmax_dist(s))
+    }
+
+    var policy = function(s) {
+        if (flip(config['randchoose'])) {
+            var aa = action_list(s)
+            return uniformDraw(aa)
+        }
+        if (config['softmax_temp'] !== 0.0){
+            return softmax_policy(s)
+        }
+        return optimal_stochastic_policy(s)
+    }
+
+    return {
+        policy,
+        action_value,
+        optimal_policy,
+        optimal_stochastic_policy,
+        softmax_policy
+    }
+}
+
+var observer = function (traj, assumptions) {
+    var config = globalStore['config']
+    // observer distribution
+    // if an empty trajectory is passed, returns the prior
+    var assumptions = typeof assumptions === 'undefined' ?
+        {} : assumptions
+    return Infer({model() {
+        var wp = extend(sampWorldParams(), assumptions)
+        if (_.isEmpty(traj)) {
+            return wp
+        }
+        var w = makeWorld(wp)
+        var initialState = w.initialState
+        var transition = w.transition
+        var actions = w.actions
+        var dem = demonstrator(wp)
+        var policy = dem.policy
+
+        var s = initialState()
+        var action_list =
+            Infer(function() {actions(s)}).support()
+        var a = wp.dem_is_communicative ?
+            policy(s) : (
+                wp.obs_is_inverse_planning ?
+                    policy(s) : uniformDraw(action_list)
+                )
+        var ns = transition(s, a)
+
+        factor(_.isEqual({s, a, ns}, traj) ? 0 : -Infinity)
+        return wp
+    }})
+}
